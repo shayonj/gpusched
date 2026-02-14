@@ -16,6 +16,12 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Verify source tree
+        run: |
+          echo "commit: $(git rev-parse HEAD)"
+          echo "tag: $(git describe --tags --always)"
+          ls -la cmd/gpusched/
+
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod

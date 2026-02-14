@@ -166,7 +166,7 @@ sudo make install     # install to /usr/local/bin
 Some directions I'm thinking about:
 
 - **HTTP API on the daemon.** Would make gpusched remotely controllable and open the door to language-agnostic clients, Prometheus metrics, and integration with existing orchestration tools.
-- **K8s integration.** Run the daemon as a DaemonSet on GPU nodes. Training scripts and serving pods talk to it via the SDK. Let K8s handle scheduling, let gpusched handle the freeze/thaw lifecycle.
+- **K8s integration.** Run the daemon as a DaemonSet on GPU nodes. Training scripts and serving pods talk to it via the SDK. Let K8s handle scheduling, let gpusched handle the freeze/thaw lifecycle maybe?
 - **Multi-node snapshot transfer.** Freeze on node A, ship the checkpoint over the network, restore on node B. Same GPU architecture required, but still faster than a cold start for large models.
 - **Policy-based eviction.** Priority levels, per-process TTLs, auto-freeze on idle. Right now eviction is pure LRU — real workloads need more control over what gets evicted and when.
 - **Crash recovery.** If the daemon restarts, reconnect to managed processes that are still alive. Today a daemon restart loses track of everything.

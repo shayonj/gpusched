@@ -32,6 +32,10 @@ Issues = "https://github.com/shayonj/gpusched/issues"
 [tool.hatch.build.targets.wheel]
 packages = ["gpusched"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"gpusched/__init__.py" = "gpusched/__init__.py"
+"gpusched/client.py" = "gpusched/client.py"
+
 [tool.pytest.ini_options]
 markers = [
     "integration: tests that require a running gpusched daemon",

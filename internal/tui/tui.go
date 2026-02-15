@@ -30,7 +30,6 @@ var (
 
 	activeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#04B575"))
 	frozenStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#3DAEE9"))
-	hibStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#888888"))
 	deadStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5555"))
 	dimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#666666"))
 	warnStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFAA00"))
@@ -257,12 +256,6 @@ func (m Model) View() string {
 		}
 		b.WriteString(fmt.Sprintf("  %-6s %s  %s%s\n", "RAM", bar, dimStyle.Render(info), dimStyle.Render(snapInfo)))
 	}
-
-	if mem.DiskUsedMB > 0 || mem.DiskBudgetMB > 0 {
-		bar := renderBar(mem.DiskUsedMB, mem.DiskBudgetMB, 30)
-		info := fmt.Sprintf("%d / %d MB", mem.DiskUsedMB, mem.DiskBudgetMB)
-		b.WriteString(fmt.Sprintf("  %-6s %s  %s\n", "Disk", bar, dimStyle.Render(info)))
-	}
 	b.WriteString("\n")
 
 	b.WriteString(headerStyle.Render("  PROCESSES") + "\n\n")
@@ -287,16 +280,15 @@ func (m Model) View() string {
 
 	met := m.status.Metrics
 	b.WriteString(headerStyle.Render("  METRICS") + "\n\n")
-	b.WriteString(fmt.Sprintf("  Requests: %s  Freezes: %s  Thaws: %s  Forks: %s  Migrations: %s\n",
+	b.WriteString(fmt.Sprintf("  Requests: %s  Freezes: %s  Thaws: %s  Migrations: %s\n",
 		boldStyle.Render(fmt.Sprintf("%d", met.Requests)),
 		boldStyle.Render(fmt.Sprintf("%d", met.Freezes)),
 		boldStyle.Render(fmt.Sprintf("%d", met.Thaws)),
-		boldStyle.Render(fmt.Sprintf("%d", met.Forks)),
 		boldStyle.Render(fmt.Sprintf("%d", met.Migrations)),
 	))
 	if met.AvgFreezeMs > 0 || met.AvgThawMs > 0 {
-		b.WriteString(fmt.Sprintf("  Avg freeze: %dms  Avg thaw: %dms  Cold starts: %d  Hibernations: %d\n",
-			met.AvgFreezeMs, met.AvgThawMs, met.ColdStarts, met.Hibernations))
+		b.WriteString(fmt.Sprintf("  Avg freeze: %dms  Avg thaw: %dms  Cold starts: %d\n",
+			met.AvgFreezeMs, met.AvgThawMs, met.ColdStarts))
 	}
 	b.WriteString("\n")
 
@@ -330,8 +322,8 @@ func (m Model) View() string {
 	b.WriteString("\n")
 
 	caps := m.status.Caps
-	capStr := dimStyle.Render(fmt.Sprintf("  cuda-checkpoint: %s  criu: %s  driver: %s",
-		boolStr(caps.CUDACheckpoint), boolStr(caps.CRIU), caps.DriverVersion))
+	capStr := dimStyle.Render(fmt.Sprintf("  cuda-checkpoint: %s  driver: %s",
+		boolStr(caps.CUDACheckpoint), caps.DriverVersion))
 	b.WriteString(capStr + "\n\n")
 
 	if m.err != nil {
@@ -372,8 +364,6 @@ func stateStyle(state protocol.ProcessState, name string) (string, string) {
 		return activeStyle.Render("●"), activeStyle.Render(name)
 	case protocol.StateFrozen:
 		return frozenStyle.Render("○"), frozenStyle.Render(name)
-	case protocol.StateHibernated:
-		return hibStyle.Render("◌"), hibStyle.Render(name)
 	default:
 		return deadStyle.Render("✕"), deadStyle.Render(name)
 	}
@@ -385,8 +375,6 @@ func stateLabel(state protocol.ProcessState) string {
 		return activeStyle.Render("active")
 	case protocol.StateFrozen:
 		return frozenStyle.Render("frozen")
-	case protocol.StateHibernated:
-		return hibStyle.Render("hibernated")
 	default:
 		return deadStyle.Render("dead")
 	}
@@ -404,16 +392,8 @@ func eventTypeLabel(typ string) string {
 		return deadStyle.Render("KILL")
 	case "exit":
 		return deadStyle.Render("EXIT")
-	case "fork":
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("#C678DD")).Render("FORK")
 	case "migrate":
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("#E5C07B")).Render("MIGRATE")
-	case "hibernate":
-		return hibStyle.Render("HIBERNATE")
-	case "evict":
-		return warnStyle.Render("EVICT")
-	case "evict-kill":
-		return deadStyle.Render("EVICT-KILL")
 	default:
 		return dimStyle.Render(strings.ToUpper(typ))
 	}

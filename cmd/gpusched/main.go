@@ -1,5 +1,5 @@
 // gpusched — GPU Process Manager
-// Freeze, thaw, fork, migrate any CUDA process.
+// Freeze, thaw, and migrate any CUDA process.
 package main
 
 import (
@@ -42,9 +42,7 @@ func main() {
 		killCmd(),
 		statusCmd(),
 		logsCmd(),
-		forkCmd(),
 		migrateCmd(),
-		hibernateCmd(),
 		dashboardCmd(),
 	)
 
@@ -57,8 +55,6 @@ func main() {
 
 func daemonCmd() *cobra.Command {
 	var ramBudget string
-	var diskBudget string
-	var diskDir string
 	var logDir string
 
 	cmd := &cobra.Command{
@@ -66,10 +62,8 @@ func daemonCmd() *cobra.Command {
 		Short: "Start the gpusched daemon (run as root for cuda-checkpoint)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg := daemon.Config{
-				RAMBudgetMB:  parseMB(ramBudget),
-				DiskBudgetMB: parseMB(diskBudget),
-				DiskDir:      diskDir,
-				LogDir:       logDir,
+				RAMBudgetMB: parseMB(ramBudget),
+				LogDir:      logDir,
 			}
 
 			d := daemon.New(cfg)
@@ -87,8 +81,6 @@ func daemonCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&ramBudget, "ram-budget", "", "max host RAM for snapshots (e.g. 80G, 80000M)")
-	cmd.Flags().StringVar(&diskBudget, "disk-budget", "500G", "max disk for hibernated snapshots")
-	cmd.Flags().StringVar(&diskDir, "disk-dir", "/tmp/gpusched/snapshots", "disk tier directory")
 	cmd.Flags().StringVar(&logDir, "log-dir", "/tmp/gpusched/logs", "process log directory")
 
 	return cmd
@@ -160,7 +152,7 @@ func freezeCmd() *cobra.Command {
 
 			var result protocol.FreezeResult
 			json.Unmarshal(resp.Result, &result)
-			fmt.Printf("Frozen %s → %s (%d ms)\n", result.Name, result.Tier, result.DurationMs)
+			fmt.Printf("Frozen %s → ram (%d ms)\n", result.Name, result.DurationMs)
 			return nil
 		},
 	}
@@ -171,7 +163,7 @@ func freezeCmd() *cobra.Command {
 func thawCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "thaw NAME",
-		Short: "Restore a frozen/hibernated process (reclaims GPU)",
+		Short: "Restore a frozen process (reclaims GPU)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := client.New(sockPath)
@@ -185,7 +177,7 @@ func thawCmd() *cobra.Command {
 
 			var result protocol.ThawResult
 			json.Unmarshal(resp.Result, &result)
-			fmt.Printf("Thawed %s ← %s (%d ms)\n", result.Name, result.FromTier, result.DurationMs)
+			fmt.Printf("Thawed %s ← ram (%d ms)\n", result.Name, result.DurationMs)
 			return nil
 		},
 	}
@@ -248,22 +240,18 @@ func statusCmd() *cobra.Command {
 }
 
 func printStatus(s protocol.StatusResult) {
-	// GPU info.
 	for _, g := range s.GPUs {
 		pct := float64(g.MemUsed) / float64(g.MemTotal) * 100
 		fmt.Printf("GPU %d: %s (%d / %d MB, %.0f%%)\n", g.Index, g.Name, g.MemUsed, g.MemTotal, pct)
 	}
 
-	// Processes grouped by state.
-	var active, frozen, hibernated []protocol.ProcessInfo
+	var active, frozen []protocol.ProcessInfo
 	for _, p := range s.Processes {
 		switch p.State {
 		case protocol.StateActive:
 			active = append(active, p)
 		case protocol.StateFrozen:
 			frozen = append(frozen, p)
-		case protocol.StateHibernated:
-			hibernated = append(hibernated, p)
 		}
 	}
 
@@ -281,27 +269,18 @@ func printStatus(s protocol.StatusResult) {
 		}
 	}
 
-	if len(hibernated) > 0 {
-		fmt.Printf("\nHibernated (disk: %d / %d MB):\n", s.Memory.DiskUsedMB, s.Memory.DiskBudgetMB)
-		for _, p := range hibernated {
-			fmt.Printf("  ◌ %-16s hibernated  %6d MB  %s\n", p.Name, p.MemMB, p.Age)
-		}
-	}
-
 	if len(s.Processes) == 0 {
 		fmt.Println("\n  (no managed processes)")
 	}
 
-	// Metrics.
 	m := s.Metrics
 	if m.Requests > 0 {
 		fmt.Printf("\nMetrics: %d req | %d freezes | %d thaws | avg freeze %dms | avg thaw %dms\n",
 			m.Requests, m.Freezes, m.Thaws, m.AvgFreezeMs, m.AvgThawMs)
 	}
 
-	// Capabilities.
-	fmt.Printf("\nCapabilities: cuda-checkpoint=%v  criu=%v  driver=%s\n",
-		s.Caps.CUDACheckpoint, s.Caps.CRIU, s.Caps.DriverVersion)
+	fmt.Printf("\nCapabilities: cuda-checkpoint=%v  driver=%s\n",
+		s.Caps.CUDACheckpoint, s.Caps.DriverVersion)
 }
 
 // ── logs ────────────────────────────────────────────────────────────────────
@@ -339,56 +318,6 @@ func logsCmd() *cobra.Command {
 	return cmd
 }
 
-// ── fork ────────────────────────────────────────────────────────────────────
-
-func forkCmd() *cobra.Command {
-	var copies int
-	var gpus string
-
-	cmd := &cobra.Command{
-		Use:   "fork NAME",
-		Short: "Branch a process into N copies (requires CRIU)",
-		Example: `  gpusched fork train --copies 3
-  gpusched fork train --copies 4 --gpus 0,1,2,3`,
-		Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			params := protocol.ForkParams{
-				Name:   args[0],
-				Copies: copies,
-			}
-
-			if gpus != "" {
-				for _, g := range strings.Split(gpus, ",") {
-					id, err := strconv.Atoi(strings.TrimSpace(g))
-					if err != nil {
-						return fmt.Errorf("invalid GPU id %q", g)
-					}
-					params.GPUs = append(params.GPUs, id)
-				}
-			}
-
-			c := client.New(sockPath)
-			resp, err := c.Call("fork", params)
-			if err != nil {
-				return err
-			}
-			if !resp.OK {
-				return fmt.Errorf("%s", resp.Error)
-			}
-
-			var result protocol.ForkResult
-			json.Unmarshal(resp.Result, &result)
-			fmt.Printf("Forked %s → %d copies: %s\n", result.Source, len(result.Copies), strings.Join(result.Copies, ", "))
-			return nil
-		},
-	}
-
-	cmd.Flags().IntVarP(&copies, "copies", "c", 2, "number of copies")
-	cmd.Flags().StringVar(&gpus, "gpus", "", "target GPUs (comma-separated, e.g. 0,1,2)")
-
-	return cmd
-}
-
 // ── migrate ─────────────────────────────────────────────────────────────────
 
 func migrateCmd() *cobra.Command {
@@ -423,28 +352,6 @@ func migrateCmd() *cobra.Command {
 	cmd.MarkFlagRequired("to")
 
 	return cmd
-}
-
-// ── hibernate ───────────────────────────────────────────────────────────────
-
-func hibernateCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "hibernate NAME",
-		Short: "Save a process to disk via CRIU (frees GPU and RAM)",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			c := client.New(sockPath)
-			resp, err := c.Call("hibernate", protocol.NameParams{Name: args[0]})
-			if err != nil {
-				return err
-			}
-			if !resp.OK {
-				return fmt.Errorf("%s", resp.Error)
-			}
-			fmt.Printf("Hibernated %s → disk\n", args[0])
-			return nil
-		},
-	}
 }
 
 // ── dashboard ───────────────────────────────────────────────────────────────

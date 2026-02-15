@@ -47,7 +47,7 @@ func TestResponseError(t *testing.T) {
 }
 
 func TestProcessStates(t *testing.T) {
-	states := []ProcessState{StateActive, StateFrozen, StateHibernated, StateDead}
+	states := []ProcessState{StateActive, StateFrozen, StateDead}
 	for _, s := range states {
 		if s == "" {
 			t.Fatal("empty state")
@@ -56,7 +56,7 @@ func TestProcessStates(t *testing.T) {
 }
 
 func TestTiers(t *testing.T) {
-	tiers := []Tier{TierGPU, TierRAM, TierDisk}
+	tiers := []Tier{TierGPU, TierRAM}
 	for _, ti := range tiers {
 		if ti == "" {
 			t.Fatal("empty tier")
@@ -72,7 +72,7 @@ func TestStatusResultRoundtrip(t *testing.T) {
 		},
 		Memory:  MemoryInfo{SnapshotsMB: 0, HostRAMBudgetMB: 100000},
 		Metrics: Metrics{Requests: 10, Freezes: 3, Thaws: 2, AvgFreezeMs: 600, AvgThawMs: 400},
-		Caps:    Capabilities{CUDACheckpoint: true, CRIU: true, DriverVersion: "580.126.09"},
+		Caps:    Capabilities{CUDACheckpoint: true, DriverVersion: "580.126.09"},
 	}
 	b, err := json.Marshal(s)
 	if err != nil {

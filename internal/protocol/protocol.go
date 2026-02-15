@@ -9,18 +9,16 @@ import (
 type ProcessState string
 
 const (
-	StateActive     ProcessState = "active"
-	StateFrozen     ProcessState = "frozen"
-	StateHibernated ProcessState = "hibernated"
-	StateDead       ProcessState = "dead"
+	StateActive ProcessState = "active"
+	StateFrozen ProcessState = "frozen"
+	StateDead   ProcessState = "dead"
 )
 
 type Tier string
 
 const (
-	TierGPU  Tier = "gpu"
-	TierRAM  Tier = "ram"
-	TierDisk Tier = "disk"
+	TierGPU Tier = "gpu"
+	TierRAM Tier = "ram"
 )
 
 type Request struct {
@@ -51,12 +49,6 @@ type RunParams struct {
 
 type NameParams struct {
 	Name string `json:"name"`
-}
-
-type ForkParams struct {
-	Name   string `json:"name"`
-	Copies int    `json:"copies"`
-	GPUs   []int  `json:"gpus,omitempty"`
 }
 
 type MigrateParams struct {
@@ -103,26 +95,21 @@ type MemoryInfo struct {
 	HostRAMFreeMB   int64 `json:"host_ram_free_mb"`
 	HostRAMBudgetMB int64 `json:"host_ram_budget_mb"`
 	SnapshotsMB     int64 `json:"snapshots_mb"`
-	DiskUsedMB      int64 `json:"disk_used_mb"`
-	DiskBudgetMB    int64 `json:"disk_budget_mb"`
 }
 
 type Metrics struct {
-	Requests     int   `json:"requests"`
-	CacheHits    int   `json:"cache_hits"`
-	Freezes      int   `json:"freezes"`
-	Thaws        int   `json:"thaws"`
-	Forks        int   `json:"forks"`
-	Migrations   int   `json:"migrations"`
-	Hibernations int   `json:"hibernations"`
-	ColdStarts   int   `json:"cold_starts"`
-	AvgFreezeMs  int64 `json:"avg_freeze_ms"`
-	AvgThawMs    int64 `json:"avg_thaw_ms"`
+	Requests    int   `json:"requests"`
+	CacheHits   int   `json:"cache_hits"`
+	Freezes     int   `json:"freezes"`
+	Thaws       int   `json:"thaws"`
+	Migrations  int   `json:"migrations"`
+	ColdStarts  int   `json:"cold_starts"`
+	AvgFreezeMs int64 `json:"avg_freeze_ms"`
+	AvgThawMs   int64 `json:"avg_thaw_ms"`
 }
 
 type Capabilities struct {
 	CUDACheckpoint bool   `json:"cuda_checkpoint"`
-	CRIU           bool   `json:"criu"`
 	DriverVersion  string `json:"driver_version,omitempty"`
 }
 
@@ -134,20 +121,13 @@ type RunResult struct {
 type FreezeResult struct {
 	Name       string `json:"name"`
 	DurationMs int64  `json:"duration_ms"`
-	Tier       Tier   `json:"tier"`
 	MemMB      int64  `json:"mem_mb"`
 }
 
 type ThawResult struct {
 	Name       string `json:"name"`
 	DurationMs int64  `json:"duration_ms"`
-	FromTier   Tier   `json:"from_tier"`
 	MemMB      int64  `json:"mem_mb"`
-}
-
-type ForkResult struct {
-	Source string   `json:"source"`
-	Copies []string `json:"copies"`
 }
 
 type MigrateResult struct {

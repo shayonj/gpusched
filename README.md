@@ -9,13 +9,13 @@
  ╚═════╝ ╚═╝      ╚═════╝ ╚══════╝ ╚═════╝╚═╝  ╚═╝╚══════╝╚═════╝
 ```
 
-**Easily Freeze and restore GPU processes in milliseconds.**
+**Freeze and restore GPU processes in milliseconds.**
 
 ---
 
 Loading an LLM takes 15–30 seconds. Restoring a frozen one takes under a second.
 
-`gpusched` is an exploratory project that wraps NVIDIA's `cuda-checkpoint` into a process manager. You freeze a GPU process, its VRAM gets parked in host RAM, and the GPU is free. When RAM is tight, the daemon can evict older snapshots to disk via CRIU. You thaw it, the model is back.
+`gpusched` wraps NVIDIA's `cuda-checkpoint` into a process manager. You freeze a GPU process, its VRAM gets parked in host RAM, and the GPU is free. You thaw it, the model is back.
 
 ## Install
 
@@ -29,7 +29,7 @@ Or pin a version:
 curl -sSL https://raw.githubusercontent.com/shayonj/gpusched/main/install.sh | GPUSCHED_VERSION=0.1.0 sudo -E bash
 ```
 
-Downloads the binary from GitHub Releases. Also installs `cuda-checkpoint`, CRIU, and a systemd service. Requires Linux, NVIDIA driver 580+.
+Downloads the binary from GitHub Releases. Also installs `cuda-checkpoint` and a systemd service. Requires Linux, NVIDIA driver 580+.
 
 ## Quick Start
 
@@ -75,22 +75,20 @@ Zero dependencies. Stdlib `socket` + `json`. Talks to the daemon over a Unix soc
 gpusched dashboard
 ```
 
-Terminal UI with live GPU/RAM/disk utilization, process table, event log. Keyboard driven: `f` freeze, `t` thaw, `x` kill, `q` quit.
+Terminal UI with live GPU/RAM utilization, process table, event log. Keyboard driven: `f` freeze, `t` thaw, `x` kill, `q` quit.
 
 ## How It Works
 
-Three memory tiers. Processes move between them:
-
 ```
-                freeze (~600ms)              evict (RAM full)
-  GPU VRAM ─────────────────▶ Host RAM ─────────────────────▶ NVMe Disk
-     ◀──────────────────────      ◀──────────────────────────
-                thaw (~400ms)                thaw (~6s)
+                freeze (~600ms)
+  GPU VRAM ─────────────────▶ Host RAM
+     ◀──────────────────────
+                thaw (~400ms)
 ```
 
 When you freeze, gpusched calls `cuda-checkpoint` to snapshot GPU state into host RAM, then stops the process with `SIGSTOP`. When you thaw, it restores the snapshot and resumes with `SIGCONT`. The process never knows it was paused.
 
-If host RAM fills up, the daemon evicts the least recently used snapshot to disk via CRIU. Thawing from disk is slower (~6s) but the data survives reboots.
+On multi-GPU machines, `gpusched migrate` can move a process from one GPU to another by checkpointing on the source and restoring on the target.
 
 ## Benchmarks
 
@@ -114,8 +112,6 @@ gpusched kill NAME                             Terminate
 gpusched status [--json]                       Processes + GPU state
 gpusched logs NAME [-n LINES]                  Process stdout/stderr
 gpusched dashboard                             Interactive TUI
-gpusched hibernate NAME                        Snapshot → disk (CRIU)
-gpusched fork NAME --copies N                  Clone into N processes
 gpusched migrate NAME --to GPU                 Move to a different GPU
 ```
 
@@ -124,10 +120,7 @@ gpusched migrate NAME --to GPU                 Move to a different GPU
 ### Daemon
 
 ```bash
-sudo gpusched daemon \
-  --ram-budget 80G \
-  --disk-budget 500G \
-  --disk-dir /var/lib/gpusched/snapshots
+sudo gpusched daemon --ram-budget 80G
 ```
 
 ```bash
@@ -154,22 +147,18 @@ sudo make install     # install to /usr/local/bin
 
 ## Limitations
 
-- Single machine only. No multi-node coordination yet.
+- Single machine only. No multi-node coordination.
 - Requires root (or `CAP_SYS_ADMIN`) for `cuda-checkpoint`.
 - Snapshots aren't portable across GPU architectures.
-- CRIU restores can hit PID conflicts. No PID namespace isolation yet.
-- Eviction under RAM pressure is LRU-only — no priority or policy controls.
+- Frozen processes live in host RAM — you need enough free host memory to hold the GPU snapshot.
 - No HTTP API — the daemon only speaks Unix socket today.
+- `cuda-checkpoint` does not support UVM or IPC memory ([upstream limitation](https://github.com/NVIDIA/cuda-checkpoint#functionality)).
 
-## Future Exploration
+## Future Exploration Ideas
 
-Some directions I'm thinking about:
-
+- **Disk-backed snapshots.** Today frozen processes live in host RAM only. A disk tier would allow unlimited frozen models and survive reboots. This is blocked on NVIDIA's `cuda-checkpoint` adding direct GPU-to-file checkpointing ([cuda-checkpoint#33](https://github.com/NVIDIA/cuda-checkpoint/issues/33)). CRIU-based dump/restore does not currently work for PyTorch processes.
 - **HTTP API on the daemon.** Would make gpusched remotely controllable and open the door to language-agnostic clients, Prometheus metrics, and integration with existing orchestration tools.
-- **K8s integration.** Run the daemon as a DaemonSet on GPU nodes. Training scripts and serving pods talk to it via the SDK. Let K8s handle scheduling, let gpusched handle the freeze/thaw lifecycle maybe?
-- **Multi-node snapshot transfer.** Freeze on node A, ship the checkpoint over the network, restore on node B. Same GPU architecture required, but still faster than a cold start for large models.
-- **Policy-based eviction.** Priority levels, per-process TTLs, auto-freeze on idle. Right now eviction is pure LRU — real workloads need more control over what gets evicted and when.
-- **Crash recovery.** If the daemon restarts, reconnect to managed processes that are still alive. Today a daemon restart loses track of everything.
+- **Policy-based eviction.** Priority levels, per-process TTLs, auto-freeze on idle.
 
 ## License
 

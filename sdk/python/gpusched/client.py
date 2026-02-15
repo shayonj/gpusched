@@ -77,10 +77,6 @@ class GpuSched:
         """Terminate a managed process."""
         return self._call("kill", {"name": name})
 
-    def hibernate(self, name: str) -> dict:
-        """Save a process to disk via CRIU."""
-        return self._call("hibernate", {"name": name})
-
     def status(self) -> dict:
         """Return full system state."""
         return self._call("status")

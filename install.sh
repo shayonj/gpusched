@@ -5,15 +5,13 @@
 # Installs:
 #   1. gpusched binary → /usr/local/bin/gpusched
 #   2. cuda-checkpoint → /usr/local/bin/cuda-checkpoint
-#   3. CRIU (via apt/dnf)
-#   4. systemd service → /etc/systemd/system/gpusched.service
-#   5. Working directories → /var/lib/gpusched/
+#   3. systemd service → /etc/systemd/system/gpusched.service
+#   4. Working directories → /var/lib/gpusched/
 set -euo pipefail
 
 GPUSCHED_VERSION="${GPUSCHED_VERSION:-latest}"
 GITHUB_REPO="shayonj/gpusched"
 INSTALL_DIR="/usr/local/bin"
-DATA_DIR="/var/lib/gpusched"
 LOG_DIR="/var/log/gpusched"
 
 # ── Colors ───────────────────────────────────────────────────────────────────
@@ -56,7 +54,7 @@ if ! command -v tar &>/dev/null; then
     error "tar is required. Install it with: apt install tar"
 fi
 
-TOTAL=7
+TOTAL=6
 
 # ── Step 1: Check GPU ────────────────────────────────────────────────────────
 
@@ -96,30 +94,9 @@ else
     fi
 fi
 
-# ── Step 3: Install CRIU ─────────────────────────────────────────────────────
+# ── Step 3: Resolve version ──────────────────────────────────────────────────
 
-step 3 "Installing CRIU"
-
-if command -v criu &>/dev/null; then
-    info "Already installed: $(criu --version 2>&1 | head -1)"
-else
-    if command -v apt-get &>/dev/null; then
-        apt-get update -qq 2>/dev/null && apt-get install -y -qq criu 2>/dev/null
-    elif command -v dnf &>/dev/null; then
-        dnf install -y -q criu 2>/dev/null
-    elif command -v yum &>/dev/null; then
-        yum install -y -q criu 2>/dev/null
-    else
-        warn "Cannot auto-install CRIU. Install manually for fork/hibernate."
-    fi
-    if command -v criu &>/dev/null; then
-        info "Installed: $(criu --version 2>&1 | head -1)"
-    fi
-fi
-
-# ── Step 4: Resolve version ──────────────────────────────────────────────────
-
-step 4 "Resolving gpusched version"
+step 3 "Resolving gpusched version"
 
 if [ "$GPUSCHED_VERSION" = "latest" ]; then
     GPUSCHED_VERSION=$(curl -fsSL "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" \
@@ -131,9 +108,9 @@ fi
 
 info "Version: v${GPUSCHED_VERSION}"
 
-# ── Step 5: Install gpusched binary ──────────────────────────────────────────
+# ── Step 4: Install gpusched binary ──────────────────────────────────────────
 
-step 5 "Installing gpusched"
+step 4 "Installing gpusched"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo /tmp)"
 ARCH="$(uname -m)"
@@ -164,11 +141,11 @@ else
     fi
 fi
 
-# ── Step 6: Create directories and systemd service ───────────────────────────
+# ── Step 5: Create directories and systemd service ───────────────────────────
 
-step 6 "Setting up systemd service"
+step 5 "Setting up systemd service"
 
-mkdir -p "$DATA_DIR/snapshots" "$LOG_DIR"
+mkdir -p "$LOG_DIR"
 
 cat > /etc/systemd/system/gpusched.service <<'EOF'
 [Unit]
@@ -178,7 +155,7 @@ Wants=nvidia-persistenced.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/gpusched daemon --disk-dir /var/lib/gpusched/snapshots
+ExecStart=/usr/local/bin/gpusched daemon
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
@@ -205,9 +182,9 @@ else
     warn "Daemon failed to start. Check: journalctl -u gpusched"
 fi
 
-# ── Step 7: Verify ───────────────────────────────────────────────────────────
+# ── Step 6: Verify ───────────────────────────────────────────────────────────
 
-step 7 "Verifying installation"
+step 6 "Verifying installation"
 
 echo ""
 if command -v gpusched &>/dev/null; then

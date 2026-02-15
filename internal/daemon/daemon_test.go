@@ -13,10 +13,8 @@ func tempDaemon(t *testing.T) *Daemon {
 	t.Helper()
 	dir := t.TempDir()
 	return New(Config{
-		LogDir:       dir + "/logs",
-		DiskDir:      dir + "/snapshots",
-		RAMBudgetMB:  8192,
-		DiskBudgetMB: 8192,
+		LogDir:      dir + "/logs",
+		RAMBudgetMB: 8192,
 	})
 }
 

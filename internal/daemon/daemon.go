@@ -20,24 +20,20 @@ import (
 )
 
 type Proc struct {
-	Name     string
-	PID      int
-	State    protocol.ProcessState
-	GPU      int
-	MemMB    int64
-	Started  time.Time
-	FrozenAt time.Time
-	Cmd      *exec.Cmd
-	LogPath  string
-	CRIUDir  string
-	logFile  *os.File
+	Name    string
+	PID     int
+	State   protocol.ProcessState
+	GPU     int
+	MemMB   int64
+	Started time.Time
+	Cmd     *exec.Cmd
+	LogPath string
+	logFile *os.File
 }
 
 type Config struct {
-	RAMBudgetMB  int64
-	DiskBudgetMB int64
-	DiskDir      string
-	LogDir       string
+	RAMBudgetMB int64
+	LogDir      string
 }
 
 type Daemon struct {
@@ -47,7 +43,6 @@ type Daemon struct {
 	metrics protocol.Metrics
 
 	cuda *checkpoint.CUDA
-	criu *checkpoint.CRIU
 	cfg  Config
 	log  *log.Logger
 
@@ -62,9 +57,6 @@ func New(cfg Config) *Daemon {
 	if cfg.LogDir == "" {
 		cfg.LogDir = "/tmp/gpusched/logs"
 	}
-	if cfg.DiskDir == "" {
-		cfg.DiskDir = "/tmp/gpusched/snapshots"
-	}
 	if cfg.RAMBudgetMB == 0 {
 		total, _ := gpu.HostMemInfo()
 		if total > 0 {
@@ -73,26 +65,20 @@ func New(cfg Config) *Daemon {
 			cfg.RAMBudgetMB = 64 * 1024
 		}
 	}
-	if cfg.DiskBudgetMB == 0 {
-		cfg.DiskBudgetMB = 500 * 1024
-	}
 
 	os.MkdirAll(cfg.LogDir, 0o755)
-	os.MkdirAll(cfg.DiskDir, 0o755)
 
 	cuda := checkpoint.NewCUDA()
-	criu := checkpoint.NewCRIU()
 
 	d := &Daemon{
 		procs: make(map[string]*Proc),
 		cuda:  cuda,
-		criu:  criu,
 		cfg:   cfg,
 		log:   log.New(os.Stderr, "[gpusched] ", log.LstdFlags|log.Lmsgprefix),
 	}
 
-	d.log.Printf("capabilities: cuda-checkpoint=%v criu=%v", cuda.Available, criu.Available)
-	d.log.Printf("config: ram_budget=%dMB disk_budget=%dMB disk_dir=%s", cfg.RAMBudgetMB, cfg.DiskBudgetMB, cfg.DiskDir)
+	d.log.Printf("capabilities: cuda-checkpoint=%v", cuda.Available)
+	d.log.Printf("config: ram_budget=%dMB", cfg.RAMBudgetMB)
 
 	return d
 }
@@ -195,10 +181,6 @@ func (d *Daemon) Freeze(name string) (protocol.FreezeResult, error) {
 		p.MemMB = mem
 	}
 
-	if err := d.ensureRAMBudget(p.MemMB); err != nil {
-		d.log.Printf("WARN: RAM pressure during freeze of %s: %v", name, err)
-	}
-
 	dur, err := d.cuda.Freeze(p.PID)
 	if err != nil {
 		return protocol.FreezeResult{}, fmt.Errorf("cuda freeze: %w", err)
@@ -207,7 +189,6 @@ func (d *Daemon) Freeze(name string) (protocol.FreezeResult, error) {
 	syscall.Kill(p.PID, syscall.SIGSTOP)
 
 	p.State = protocol.StateFrozen
-	p.FrozenAt = time.Now()
 
 	d.metrics.Freezes++
 	d.freezeTotalMs += dur.Milliseconds()
@@ -224,7 +205,6 @@ func (d *Daemon) Freeze(name string) (protocol.FreezeResult, error) {
 	return protocol.FreezeResult{
 		Name:       name,
 		DurationMs: dur.Milliseconds(),
-		Tier:       protocol.TierRAM,
 		MemMB:      p.MemMB,
 	}, nil
 }
@@ -237,18 +217,10 @@ func (d *Daemon) Thaw(name string) (protocol.ThawResult, error) {
 	if !ok {
 		return protocol.ThawResult{}, fmt.Errorf("process %q not found", name)
 	}
-
-	switch p.State {
-	case protocol.StateFrozen:
-		return d.thawFromRAM(p)
-	case protocol.StateHibernated:
-		return d.thawFromDisk(p)
-	default:
-		return protocol.ThawResult{}, fmt.Errorf("process %q is %s, not frozen/hibernated", name, p.State)
+	if p.State != protocol.StateFrozen {
+		return protocol.ThawResult{}, fmt.Errorf("process %q is %s, not frozen", name, p.State)
 	}
-}
 
-func (d *Daemon) thawFromRAM(p *Proc) (protocol.ThawResult, error) {
 	syscall.Kill(p.PID, syscall.SIGCONT)
 
 	dur, err := d.cuda.Thaw(p.PID)
@@ -274,50 +246,6 @@ func (d *Daemon) thawFromRAM(p *Proc) (protocol.ThawResult, error) {
 	return protocol.ThawResult{
 		Name:       p.Name,
 		DurationMs: dur.Milliseconds(),
-		FromTier:   protocol.TierRAM,
-		MemMB:      p.MemMB,
-	}, nil
-}
-
-func (d *Daemon) thawFromDisk(p *Proc) (protocol.ThawResult, error) {
-	if !d.criu.Available {
-		return protocol.ThawResult{}, fmt.Errorf("criu not available — can't restore from disk")
-	}
-
-	newPID, criuDur, err := d.criu.Restore(p.CRIUDir)
-	if err != nil {
-		return protocol.ThawResult{}, fmt.Errorf("criu restore: %w", err)
-	}
-
-	cudaDur, err := d.cuda.Thaw(newPID)
-	if err != nil {
-		syscall.Kill(newPID, syscall.SIGKILL)
-		return protocol.ThawResult{}, fmt.Errorf("cuda thaw after criu: %w", err)
-	}
-
-	totalDur := criuDur + cudaDur
-	p.PID = newPID
-	p.State = protocol.StateActive
-	p.CRIUDir = ""
-
-	go d.monitorPID(p.Name, newPID)
-
-	d.metrics.Thaws++
-	d.thawTotalMs += totalDur.Milliseconds()
-	d.metrics.AvgThawMs = d.thawTotalMs / int64(d.metrics.Thaws)
-
-	d.emit(protocol.Event{
-		Type:     "thaw",
-		Process:  p.Name,
-		Duration: totalDur.Milliseconds(),
-		Detail:   fmt.Sprintf("← disk (criu=%dms cuda=%dms)", criuDur.Milliseconds(), cudaDur.Milliseconds()),
-	})
-
-	d.log.Printf("THAW %s pid=%d %dms ← disk", p.Name, newPID, totalDur.Milliseconds())
-	return protocol.ThawResult{
-		Name:       p.Name,
-		DurationMs: totalDur.Milliseconds(),
-		FromTier:   protocol.TierDisk,
 		MemMB:      p.MemMB,
 	}, nil
 }
@@ -331,19 +259,14 @@ func (d *Daemon) Kill(name string) error {
 		return fmt.Errorf("process %q not found", name)
 	}
 
-	switch p.State {
-	case protocol.StateActive, protocol.StateFrozen:
-		if p.State == protocol.StateFrozen {
-			syscall.Kill(p.PID, syscall.SIGCONT)
-		}
-		syscall.Kill(p.PID, syscall.SIGTERM)
-		go func(pid int) {
-			time.Sleep(3 * time.Second)
-			syscall.Kill(pid, syscall.SIGKILL)
-		}(p.PID)
-	case protocol.StateHibernated:
-		os.RemoveAll(p.CRIUDir)
+	if p.State == protocol.StateFrozen {
+		syscall.Kill(p.PID, syscall.SIGCONT)
 	}
+	syscall.Kill(p.PID, syscall.SIGTERM)
+	go func(pid int) {
+		time.Sleep(3 * time.Second)
+		syscall.Kill(pid, syscall.SIGKILL)
+	}(p.PID)
 
 	p.State = protocol.StateDead
 	if p.logFile != nil {
@@ -355,87 +278,6 @@ func (d *Daemon) Kill(name string) error {
 
 	delete(d.procs, name)
 	return nil
-}
-
-func (d *Daemon) Fork(params protocol.ForkParams) (protocol.ForkResult, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	if !d.criu.Available {
-		return protocol.ForkResult{}, fmt.Errorf("fork requires CRIU (install: apt install criu)")
-	}
-
-	p, ok := d.procs[params.Name]
-	if !ok {
-		return protocol.ForkResult{}, fmt.Errorf("process %q not found", params.Name)
-	}
-
-	if p.State == protocol.StateActive {
-		d.mu.Unlock()
-		if _, err := d.Freeze(params.Name); err != nil {
-			d.mu.Lock()
-			return protocol.ForkResult{}, fmt.Errorf("freezing source: %w", err)
-		}
-		d.mu.Lock()
-	}
-
-	dumpDir := checkpoint.DumpDir(d.cfg.DiskDir, params.Name+"-fork-source")
-	if _, err := d.criu.Dump(p.PID, dumpDir); err != nil {
-		return protocol.ForkResult{}, fmt.Errorf("criu dump for fork: %w", err)
-	}
-
-	var copies []string
-	for i := 1; i <= params.Copies; i++ {
-		copyName := fmt.Sprintf("%s-%d", params.Name, i)
-		targetGPU := p.GPU
-		if i-1 < len(params.GPUs) {
-			targetGPU = params.GPUs[i-1]
-		}
-
-		newPID, _, err := d.criu.Restore(dumpDir)
-		if err != nil {
-			d.log.Printf("WARN: fork copy %d failed criu restore: %v", i, err)
-			continue
-		}
-
-		if targetGPU != p.GPU {
-			_, err = d.cuda.RestoreOnDevice(newPID, targetGPU)
-		} else {
-			_, err = d.cuda.Thaw(newPID)
-		}
-		if err != nil {
-			syscall.Kill(newPID, syscall.SIGKILL)
-			d.log.Printf("WARN: fork copy %d failed cuda restore: %v", i, err)
-			continue
-		}
-
-		logPath := filepath.Join(d.cfg.LogDir, copyName+".log")
-		logFile, _ := os.Create(logPath)
-
-		d.procs[copyName] = &Proc{
-			Name:    copyName,
-			PID:     newPID,
-			State:   protocol.StateActive,
-			GPU:     targetGPU,
-			MemMB:   p.MemMB,
-			Started: time.Now(),
-			LogPath: logPath,
-			logFile: logFile,
-		}
-		copies = append(copies, copyName)
-
-		go d.monitorPID(copyName, newPID)
-	}
-
-	d.metrics.Forks++
-	d.emit(protocol.Event{
-		Type:    "fork",
-		Process: params.Name,
-		Detail:  fmt.Sprintf("%d copies: %v", len(copies), copies),
-	})
-
-	d.log.Printf("FORK %s → %d copies: %v", params.Name, len(copies), copies)
-	return protocol.ForkResult{Source: params.Name, Copies: copies}, nil
 }
 
 func (d *Daemon) Migrate(params protocol.MigrateParams) (protocol.MigrateResult, error) {
@@ -490,57 +332,6 @@ func (d *Daemon) Migrate(params protocol.MigrateParams) (protocol.MigrateResult,
 	}, nil
 }
 
-func (d *Daemon) Hibernate(name string) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	if !d.criu.Available {
-		return fmt.Errorf("hibernate requires CRIU (install: apt install criu)")
-	}
-
-	p, ok := d.procs[name]
-	if !ok {
-		return fmt.Errorf("process %q not found", name)
-	}
-
-	if p.State == protocol.StateActive {
-		if mem := gpu.ProcessGPUMem(p.PID); mem > 0 {
-			p.MemMB = mem
-		}
-		if _, err := d.cuda.Freeze(p.PID); err != nil {
-			return fmt.Errorf("freeze for hibernate: %w", err)
-		}
-		syscall.Kill(p.PID, syscall.SIGSTOP)
-		p.State = protocol.StateFrozen
-	}
-
-	if p.State != protocol.StateFrozen {
-		return fmt.Errorf("process %q must be active or frozen to hibernate", name)
-	}
-
-	syscall.Kill(p.PID, syscall.SIGCONT)
-
-	dumpDir := checkpoint.DumpDir(d.cfg.DiskDir, name)
-	dur, err := d.criu.Dump(p.PID, dumpDir)
-	if err != nil {
-		return fmt.Errorf("criu dump: %w", err)
-	}
-
-	p.State = protocol.StateHibernated
-	p.CRIUDir = dumpDir
-
-	d.metrics.Hibernations++
-	d.emit(protocol.Event{
-		Type:     "hibernate",
-		Process:  name,
-		Duration: dur.Milliseconds(),
-		Detail:   fmt.Sprintf("→ disk %s (%d MB)", dumpDir, p.MemMB),
-	})
-
-	d.log.Printf("HIBERNATE %s → %s %dms", name, dumpDir, dur.Milliseconds())
-	return nil
-}
-
 func (d *Daemon) Status() protocol.StatusResult {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
@@ -550,7 +341,6 @@ func (d *Daemon) Status() protocol.StatusResult {
 
 	var procs []protocol.ProcessInfo
 	var snapshotsMB int64
-	var diskMB int64
 
 	for _, p := range d.procs {
 		if p.State == protocol.StateActive {
@@ -560,13 +350,9 @@ func (d *Daemon) Status() protocol.StatusResult {
 		}
 
 		tier := protocol.TierGPU
-		switch p.State {
-		case protocol.StateFrozen:
+		if p.State == protocol.StateFrozen {
 			tier = protocol.TierRAM
 			snapshotsMB += p.MemMB
-		case protocol.StateHibernated:
-			tier = protocol.TierDisk
-			diskMB += p.MemMB
 		}
 
 		procs = append(procs, protocol.ProcessInfo{
@@ -583,10 +369,9 @@ func (d *Daemon) Status() protocol.StatusResult {
 
 	sort.Slice(procs, func(i, j int) bool {
 		order := map[protocol.ProcessState]int{
-			protocol.StateActive:     0,
-			protocol.StateFrozen:     1,
-			protocol.StateHibernated: 2,
-			protocol.StateDead:       3,
+			protocol.StateActive: 0,
+			protocol.StateFrozen: 1,
+			protocol.StateDead:   2,
 		}
 		return order[procs[i].State] < order[procs[j].State]
 	})
@@ -604,14 +389,11 @@ func (d *Daemon) Status() protocol.StatusResult {
 			HostRAMFreeMB:   freeRAM,
 			HostRAMBudgetMB: d.cfg.RAMBudgetMB,
 			SnapshotsMB:     snapshotsMB,
-			DiskUsedMB:      diskMB,
-			DiskBudgetMB:    d.cfg.DiskBudgetMB,
 		},
 		Metrics: d.metrics,
 		Events:  recentEvents,
 		Caps: protocol.Capabilities{
 			CUDACheckpoint: d.cuda.Available,
-			CRIU:           d.criu.Available,
 			DriverVersion:  gpu.DriverVersion(),
 		},
 	}
@@ -706,17 +488,6 @@ func (d *Daemon) Handle(req protocol.Request) protocol.Response {
 		}
 		return protocol.OkResponse("ok")
 
-	case "fork":
-		var p protocol.ForkParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return protocol.ErrResponse("bad params: " + err.Error())
-		}
-		res, err := d.Fork(p)
-		if err != nil {
-			return protocol.ErrResponse(err.Error())
-		}
-		return protocol.OkResponse(res)
-
 	case "migrate":
 		var p protocol.MigrateParams
 		if err := json.Unmarshal(req.Params, &p); err != nil {
@@ -727,16 +498,6 @@ func (d *Daemon) Handle(req protocol.Request) protocol.Response {
 			return protocol.ErrResponse(err.Error())
 		}
 		return protocol.OkResponse(res)
-
-	case "hibernate":
-		var p protocol.NameParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return protocol.ErrResponse("bad params: " + err.Error())
-		}
-		if err := d.Hibernate(p.Name); err != nil {
-			return protocol.ErrResponse(err.Error())
-		}
-		return protocol.OkResponse("ok")
 
 	case "status":
 		return protocol.OkResponse(d.Status())
@@ -774,8 +535,6 @@ func (d *Daemon) Shutdown() {
 			d.log.Printf("  killing frozen process %s (pid=%d)", name, p.PID)
 			syscall.Kill(p.PID, syscall.SIGCONT)
 			syscall.Kill(p.PID, syscall.SIGTERM)
-		case protocol.StateHibernated:
-			d.log.Printf("  hibernated process %s left on disk at %s", name, p.CRIUDir)
 		}
 		if p.logFile != nil {
 			p.logFile.Close()
@@ -808,63 +567,6 @@ func (d *Daemon) emit(e protocol.Event) {
 	d.subMu.Unlock()
 }
 
-func (d *Daemon) ensureRAMBudget(sizeMB int64) error {
-	_, freeRAM := gpu.HostMemInfo()
-	safetyMB := int64(4096)
-
-	if freeRAM-sizeMB > safetyMB {
-		return nil
-	}
-
-	var frozen []*Proc
-	for _, p := range d.procs {
-		if p.State == protocol.StateFrozen {
-			frozen = append(frozen, p)
-		}
-	}
-	sort.Slice(frozen, func(i, j int) bool {
-		return frozen[i].FrozenAt.Before(frozen[j].FrozenAt)
-	})
-
-	for _, victim := range frozen {
-		if freeRAM-sizeMB > safetyMB {
-			break
-		}
-
-		if d.criu.Available {
-			d.log.Printf("RAM pressure: hibernating %s (%d MB) to disk", victim.Name, victim.MemMB)
-			syscall.Kill(victim.PID, syscall.SIGCONT)
-			dumpDir := checkpoint.DumpDir(d.cfg.DiskDir, victim.Name)
-			if _, err := d.criu.Dump(victim.PID, dumpDir); err != nil {
-				d.log.Printf("  WARN: criu dump failed: %v", err)
-				continue
-			}
-			victim.State = protocol.StateHibernated
-			victim.CRIUDir = dumpDir
-			freeRAM += victim.MemMB
-			d.metrics.Hibernations++
-			d.emit(protocol.Event{
-				Type:    "evict",
-				Process: victim.Name,
-				Detail:  fmt.Sprintf("RAM → disk (%d MB)", victim.MemMB),
-			})
-		} else {
-			d.log.Printf("RAM pressure: killing frozen %s (no CRIU for disk tier)", victim.Name)
-			syscall.Kill(victim.PID, syscall.SIGCONT)
-			syscall.Kill(victim.PID, syscall.SIGKILL)
-			victim.State = protocol.StateDead
-			freeRAM += victim.MemMB
-			d.emit(protocol.Event{
-				Type:    "evict-kill",
-				Process: victim.Name,
-				Detail:  fmt.Sprintf("killed — no CRIU (%d MB freed)", victim.MemMB),
-			})
-		}
-	}
-
-	return nil
-}
-
 func (d *Daemon) monitorProcess(name string, cmd *exec.Cmd) {
 	err := cmd.Wait()
 	d.mu.Lock()
@@ -874,7 +576,7 @@ func (d *Daemon) monitorProcess(name string, cmd *exec.Cmd) {
 	if !ok {
 		return
 	}
-	if p.State == protocol.StateDead || p.State == protocol.StateHibernated {
+	if p.State == protocol.StateDead {
 		return
 	}
 
@@ -890,22 +592,6 @@ func (d *Daemon) monitorProcess(name string, cmd *exec.Cmd) {
 
 	d.emit(protocol.Event{Type: "exit", Process: name, Detail: detail})
 	d.log.Printf("EXIT %s pid=%d: %s", name, p.PID, detail)
-}
-
-func (d *Daemon) monitorPID(name string, pid int) {
-	for {
-		if err := syscall.Kill(pid, 0); err != nil {
-			d.mu.Lock()
-			if p, ok := d.procs[name]; ok && p.PID == pid && p.State != protocol.StateDead && p.State != protocol.StateHibernated {
-				p.State = protocol.StateDead
-				d.emit(protocol.Event{Type: "exit", Process: name, Detail: "process gone"})
-				d.log.Printf("EXIT %s pid=%d: process gone", name, pid)
-			}
-			d.mu.Unlock()
-			return
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
 }
 
 func formatDuration(d time.Duration) string {

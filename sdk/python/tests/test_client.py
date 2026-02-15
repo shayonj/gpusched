@@ -69,16 +69,15 @@ def daemon(tmp_path):
         "processes": [
             {"name": "model-a", "pid": 100, "state": "active", "gpu": 0, "mem_mb": 1500, "age": "10s", "tier": "gpu"},
         ],
-        "memory": {"snapshots_mb": 0, "host_ram_budget_mb": 100000, "disk_used_mb": 0, "disk_budget_mb": 500000},
+        "memory": {"snapshots_mb": 0, "host_ram_budget_mb": 100000},
         "metrics": {"requests": 5, "freezes": 2, "thaws": 1, "avg_freeze_ms": 600, "avg_thaw_ms": 400},
-        "capabilities": {"cuda_checkpoint": True, "criu": True, "driver_version": "580.126.09"},
+        "capabilities": {"cuda_checkpoint": True, "driver_version": "580.126.09"},
     })
     d.set_response("run", {"name": "test-proc", "pid": 999})
-    d.set_response("freeze", {"name": "model-a", "duration_ms": 609, "tier": "ram", "mem_mb": 1500})
-    d.set_response("thaw", {"name": "model-a", "duration_ms": 427, "tier": "gpu", "mem_mb": 1500})
+    d.set_response("freeze", {"name": "model-a", "duration_ms": 609, "mem_mb": 1500})
+    d.set_response("thaw", {"name": "model-a", "duration_ms": 427, "mem_mb": 1500})
     d.set_response("kill", {"name": "model-a"})
     d.set_response("logs", {"name": "model-a", "output": "Loading model...\nReady.", "lines": 2})
-    d.set_response("hibernate", {"name": "model-a"})
     d.start()
     yield d, sock_path
     d.stop()
@@ -109,14 +108,12 @@ class TestGpuSchedClient:
         sched = GpuSched(socket_path=sock)
         result = sched.freeze("model-a")
         assert result["duration_ms"] == 609
-        assert result["tier"] == "ram"
 
     def test_thaw(self, daemon):
         _, sock = daemon
         sched = GpuSched(socket_path=sock)
         result = sched.thaw("model-a")
         assert result["duration_ms"] == 427
-        assert result["tier"] == "gpu"
 
     def test_kill(self, daemon):
         _, sock = daemon
@@ -130,18 +127,12 @@ class TestGpuSchedClient:
         result = sched.logs("model-a", lines=2)
         assert "Ready." in result["output"]
 
-    def test_hibernate(self, daemon):
-        _, sock = daemon
-        sched = GpuSched(socket_path=sock)
-        result = sched.hibernate("model-a")
-        assert result["name"] == "model-a"
-
     def test_swap(self, daemon):
         _, sock = daemon
         sched = GpuSched(socket_path=sock)
         fr, th = sched.swap("model-a", "model-a")
-        assert fr["tier"] == "ram"
-        assert th["tier"] == "gpu"
+        assert fr["duration_ms"] == 609
+        assert th["duration_ms"] == 427
 
     def test_processes(self, daemon):
         _, sock = daemon

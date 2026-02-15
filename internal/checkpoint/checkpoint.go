@@ -1,4 +1,4 @@
-// Package checkpoint wraps the cuda-checkpoint and CRIU command-line tools.
+// Package checkpoint wraps the cuda-checkpoint command-line tool.
 package checkpoint
 
 import (
@@ -104,81 +104,4 @@ func (c *CUDA) exec(action string, pid int, extra ...string) (time.Duration, err
 			action, pid, strings.TrimSpace(string(out)), err)
 	}
 	return elapsed, nil
-}
-
-type CRIU struct {
-	Binary    string
-	Available bool
-}
-
-func NewCRIU() *CRIU {
-	path, err := exec.LookPath("criu")
-	if err != nil {
-		return &CRIU{Available: false}
-	}
-	cmd := exec.Command(path, "check")
-	if err := cmd.Run(); err != nil {
-		return &CRIU{Binary: path, Available: false}
-	}
-	return &CRIU{Binary: path, Available: true}
-}
-
-func (cr *CRIU) Dump(pid int, dir string) (time.Duration, error) {
-	if !cr.Available {
-		return 0, fmt.Errorf("criu not available (install: apt install criu)")
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return 0, fmt.Errorf("creating dump dir: %w", err)
-	}
-
-	start := time.Now()
-	cmd := exec.Command(cr.Binary, "dump",
-		"-t", strconv.Itoa(pid),
-		"-D", dir,
-		"--shell-job",
-		"--tcp-established",
-		"-v0",
-	)
-	out, err := cmd.CombinedOutput()
-	elapsed := time.Since(start)
-	if err != nil {
-		return elapsed, fmt.Errorf("criu dump pid=%d: %s (%w)", pid, strings.TrimSpace(string(out)), err)
-	}
-	return elapsed, nil
-}
-
-func (cr *CRIU) Restore(dir string) (int, time.Duration, error) {
-	if !cr.Available {
-		return 0, 0, fmt.Errorf("criu not available")
-	}
-	pidFile := dir + "/restored.pid"
-
-	start := time.Now()
-	cmd := exec.Command(cr.Binary, "restore",
-		"-D", dir,
-		"--shell-job",
-		"--tcp-established",
-		"-d",
-		"--pidfile", pidFile,
-		"-v0",
-	)
-	out, err := cmd.CombinedOutput()
-	elapsed := time.Since(start)
-	if err != nil {
-		return 0, elapsed, fmt.Errorf("criu restore: %s (%w)", strings.TrimSpace(string(out)), err)
-	}
-
-	pidBytes, err := os.ReadFile(pidFile)
-	if err != nil {
-		return 0, elapsed, fmt.Errorf("reading restored pid: %w", err)
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
-	if err != nil {
-		return 0, elapsed, fmt.Errorf("parsing restored pid: %w", err)
-	}
-	return pid, elapsed, nil
-}
-
-func DumpDir(baseDir, name string) string {
-	return baseDir + "/" + name
 }
